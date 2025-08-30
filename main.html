@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Maze Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs, orderBy, limit, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Use provided globals for Firebase
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Firebase Initialization and Auth ---
+        let app, db, auth, userId;
+        let isAuthReady = false;
+
+        async function initializeFirebase() {
+            try {
+                // Set Firestore log level to debug
+                setLogLevel('debug');
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser.uid;
+                isAuthReady = true;
+                // Show the name entry modal
+                document.getElementById('nameModal').classList.remove('hidden');
+                console.log("Firebase initialized successfully.");
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                document.getElementById('statusMessage').textContent = 'Connection failed. Please refresh.';
+            }
+        }
+
+        // --- Game Setup ---
+        const gridSize = 20; // Number of cells per side
+        const cellSize = 25; // Size of each cell in pixels
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let maze = [];
+        // The player object now includes a name
+        let player = { x: 0, y: 0, color: '#007bff', name: '' };
+        let players = {}; // Object to hold other players data
+        let startTime, endTime;
+        let isGameRunning = false;
+        let gameCompleted = false;
+
+        // Random color for the player
+        player.color = '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+
+        // New, more complex maze generation algorithm (Iterative DFS)
+        function generateMaze() {
+            maze = [];
+            for (let i = 0; i < gridSize; i++) {
+                maze[i] = [];
+                for (let j = 0; j < gridSize; j++) {
+                    maze[i][j] = {
+                        top: true, right: true, bottom: true, left: true, visited: false
+                    };
+                }
+            }
+            
+            const stack = [];
+            const startX = 0;
+            const startY = 0;
+            stack.push([startX, startY]);
+            maze[startY][startX].visited = true;
+
+            while (stack.length > 0) {
+                const [currentX, currentY] = stack[stack.length - 1];
+                const neighbors = getUnvisitedNeighbors(currentX, currentY);
+
+                if (neighbors.length > 0) {
+                    const [nextX, nextY, direction] = neighbors[Math.floor(Math.random() * neighbors.length)];
+                    
+                    // Carve path
+                    if (direction === 'top') {
+                        maze[currentY][currentX].top = false;
+                        maze[nextY][nextX].bottom = false;
+                    } else if (direction === 'right') {
+                        maze[currentY][currentX].right = false;
+                        maze[nextY][nextX].left = false;
+                    } else if (direction === 'bottom') {
+                        maze[currentY][currentX].bottom = false;
+                        maze[nextY][nextX].top = false;
+                    } else if (direction === 'left') {
+                        maze[currentY][currentX].left = false;
+                        maze[nextY][nextX].right = false;
+                    }
+
+                    maze[nextY][nextX].visited = true;
+                    stack.push([nextX, nextY]);
+                } else {
+                    stack.pop();
+                }
+            }
+        }
+
+        function getUnvisitedNeighbors(x, y) {
+            const neighbors = [];
+            if (y > 0 && !maze[y - 1][x].visited) neighbors.push([x, y - 1, 'top']);
+            if (x < gridSize - 1 && !maze[y][x + 1].visited) neighbors.push([x + 1, y, 'right']);
+            if (y < gridSize - 1 && !maze[y + 1][x].visited) neighbors.push([x, y + 1, 'bottom']);
+            if (x > 0 && !maze[y][x - 1].visited) neighbors.push([x - 1, y, 'left']);
+            return shuffle(neighbors);
+        }
+
+
+        function drawMaze() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#2d3748';
+            ctx.lineWidth = 2;
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const cell = maze[y][x];
+                    const sx = x * cellSize;
+                    const sy = y * cellSize;
+
+                    if (cell.top) ctx.strokeRect(sx, sy, cellSize, 0);
+                    if (cell.right) ctx.strokeRect(sx + cellSize, sy, 0, cellSize);
+                    if (cell.bottom) ctx.strokeRect(sx, sy + cellSize, cellSize, 0);
+                    if (cell.left) ctx.strokeRect(sx, sy, 0, cellSize);
+                }
+            }
+
+            // Draw start and end points
+            ctx.fillStyle = '#10b981'; // Green for start
+            ctx.beginPath();
+            ctx.arc(cellSize / 2, cellSize / 2, cellSize / 3, 0, 2 * Math.PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ef4444'; // Red for end
+            ctx.beginPath();
+            ctx.arc((gridSize - 1) * cellSize + cellSize / 2, (gridSize - 1) * cellSize + cellSize / 2, cellSize / 3, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+
+        function drawPlayer() {
+            // Draw current player
+            ctx.fillStyle = player.color;
+            ctx.beginPath();
+            ctx.arc(player.x * cellSize + cellSize / 2, player.y * cellSize + cellSize / 2, cellSize / 3, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Draw other players
+            for (const id in players) {
+                if (id !== userId) {
+                    const otherPlayer = players[id];
+                    ctx.fillStyle = otherPlayer.color;
+                    ctx.beginPath();
+                    ctx.arc(otherPlayer.x * cellSize + cellSize / 2, otherPlayer.y * cellSize + cellSize / 2, cellSize / 3, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+        }
+
+        function move(dx, dy) {
+            if (!isGameRunning || gameCompleted) return;
+
+            const nextX = player.x + dx;
+            const nextY = player.y + dy;
+
+            if (nextX < 0 || nextX >= gridSize || nextY < 0 || nextY >= gridSize) {
+                return;
+            }
+
+            const currentCell = maze[player.y][player.x];
+            let canMove = false;
+            if (dx === 1 && !currentCell.right) canMove = true;
+            if (dx === -1 && !currentCell.left) canMove = true;
+            if (dy === 1 && !currentCell.bottom) canMove = true;
+            if (dy === -1 && !currentCell.top) canMove = true;
+
+            if (canMove) {
+                player.x = nextX;
+                player.y = nextY;
+                updatePlayerPosition();
+                checkWin();
+            }
+        }
+
+        function checkWin() {
+            if (player.x === gridSize - 1 && player.y === gridSize - 1 && !gameCompleted) {
+                endTime = new Date();
+                gameCompleted = true;
+                isGameRunning = false;
+                const timeTaken = (endTime - startTime) / 1000;
+                document.getElementById('statusMessage').textContent = `You finished in ${timeTaken.toFixed(2)} seconds!`;
+                
+                // Add to leaderboard
+                addScore(timeTaken);
+            }
+        }
+
+        function initGame() {
+            canvas.width = gridSize * cellSize;
+            canvas.height = gridSize * cellSize;
+            generateMaze();
+            player.x = 0;
+            player.y = 0;
+            startTime = new Date();
+            isGameRunning = true;
+            gameCompleted = false;
+            updatePlayerPosition(); // Initial position sync
+            
+            // Set up Firestore listeners
+            listenForPlayers();
+            listenForLeaderboard();
+            
+            // Draw the game
+            drawMaze();
+            drawPlayer();
+        }
+
+        function shuffle(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+
+        // --- Firestore Operations ---
+        async function updatePlayerPosition() {
+            if (!isAuthReady || !db) return;
+            const docRef = doc(db, `artifacts/${appId}/public/data/players`, userId);
+            try {
+                // Now saving the player's name as well
+                await setDoc(docRef, {
+                    x: player.x,
+                    y: player.y,
+                    color: player.color,
+                    name: player.name,
+                    lastActive: serverTimestamp()
+                });
+            } catch (error) {
+                console.error("Error updating player position:", error);
+            }
+        }
+
+        async function listenForPlayers() {
+            if (!isAuthReady || !db) return;
+            const playersCol = collection(db, `artifacts/${appId}/public/data/players`);
+            onSnapshot(playersCol, (snapshot) => {
+                const newPlayers = {};
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    newPlayers[doc.id] = data;
+                });
+                players = newPlayers;
+                drawMaze(); // Redraw maze
+                drawPlayer(); // Redraw all players
+            }, (error) => {
+                console.error("Error listening for players:", error);
+            });
+        }
+        
+        async function addScore(time) {
+            if (!isAuthReady || !db) return;
+            const leaderboardCol = collection(db, `artifacts/${appId}/public/data/leaderboard`);
+            try {
+                // Now adding the player's name to the score document
+                await addDoc(leaderboardCol, {
+                    userId: userId,
+                    name: player.name,
+                    time: time,
+                    createdAt: serverTimestamp()
+                });
+            } catch (error) {
+                console.error("Error adding score to leaderboard:", error);
+            }
+        }
+        
+        async function listenForLeaderboard() {
+            if (!isAuthReady || !db) return;
+            const leaderboardCol = collection(db, `artifacts/${appId}/public/data/leaderboard`);
+            const q = query(leaderboardCol, orderBy("time"), limit(10));
+            onSnapshot(q, (snapshot) => {
+                const leaderboard = [];
+                snapshot.forEach(doc => {
+                    leaderboard.push(doc.data());
+                });
+                updateLeaderboardUI(leaderboard);
+            }, (error) => {
+                console.error("Error listening for leaderboard:", error);
+            });
+        }
+        
+        function updateLeaderboardUI(data) {
+            const list = document.getElementById('leaderboardList');
+            list.innerHTML = '';
+            if (data.length === 0) {
+                list.innerHTML = '<p class="text-gray-500">No scores yet. Be the first!</p>';
+            }
+            data.forEach((entry, index) => {
+                const li = document.createElement('li');
+                li.className = 'py-2 px-4 rounded-lg flex items-center justify-between text-sm transition-colors duration-200 ' +
+                                'bg-gray-100 dark:bg-gray-800';
+                if (entry.userId === userId) {
+                    li.classList.add('bg-blue-200', 'dark:bg-blue-600', 'font-bold');
+                }
+                li.innerHTML = `
+                    <div class="flex items-center">
+                        <span class="font-semibold w-6 text-center">${index + 1}.</span>
+                        <!-- Display the user's name from the document -->
+                        <span class="ml-2 truncate">${entry.name}</span>
+                    </div>
+                    <span class="font-mono text-gray-700 dark:text-gray-300">${entry.time.toFixed(2)}s</span>
+                `;
+                list.appendChild(li);
+            });
+        }
+
+        // --- Event Listeners ---
+        document.addEventListener('keydown', (e) => {
+            if (isGameRunning) {
+                if (e.key === 'ArrowUp') move(0, -1);
+                if (e.key === 'ArrowDown') move(0, 1);
+                if (e.key === 'ArrowLeft') move(-1, 0);
+                if (e.key === 'ArrowRight') move(1, 0);
+            }
+        });
+        
+        document.getElementById('restartButton').addEventListener('click', () => {
+            initGame();
+            document.getElementById('statusMessage').textContent = 'Game restarted. Use arrow keys to move!';
+        });
+
+        // Event listener for the start game button
+        document.getElementById('startGameButton').addEventListener('click', () => {
+            const playerNameInput = document.getElementById('playerNameInput');
+            const playerName = playerNameInput.value.trim();
+            if (playerName) {
+                player.name = playerName;
+                document.getElementById('nameModal').classList.add('hidden');
+                document.getElementById('userIdDisplay').textContent = `User: ${player.name} (${userId})`;
+                initGame();
+            } else {
+                playerNameInput.placeholder = 'Please enter a name...';
+            }
+        });
+
+        // Start everything on window load
+        window.onload = initializeFirebase;
+    </script>
+</head>
+<body class="bg-slate-50 text-slate-900 flex flex-col min-h-screen font-sans antialiased items-center p-4">
+
+    <!-- Main Container -->
+    <div class="w-full max-w-5xl mx-auto flex flex-col lg:flex-row items-center justify-center p-4 gap-8">
+        <!-- Game Section -->
+        <div class="flex flex-col items-center justify-center bg-white rounded-2xl shadow-lg p-6 w-full max-w-md lg:w-auto lg:p-8">
+            <h1 class="text-4xl font-extrabold text-indigo-700 mb-2">Maze Runners</h1>
+            <p class="text-sm text-gray-600 mb-4 text-center" id="userIdDisplay">User: Connecting...</p>
+            <div class="border-4 border-slate-300 rounded-lg overflow-hidden mb-4 shadow-inner">
+                <canvas id="gameCanvas" class="bg-gray-50"></canvas>
+            </div>
+            <p id="statusMessage" class="text-center font-medium text-gray-700 mb-4">Connecting to Firebase...</p>
+            <button id="restartButton" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-transform transform hover:scale-105 active:scale-95 shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50">
+                Restart Game
+            </button>
+        </div>
+
+        <!-- Leaderboard Section -->
+        <div class="w-full max-w-md lg:w-auto bg-white rounded-2xl shadow-lg p-6 lg:p-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 text-center">Leaderboard</h2>
+            <div class="bg-gray-50 rounded-xl p-4 overflow-auto max-h-96">
+                <ul id="leaderboardList" class="space-y-3">
+                    <li class="py-2 px-4 rounded-lg bg-gray-100 flex items-center justify-between text-sm">
+                        <span class="animate-pulse bg-gray-300 h-4 w-1/2 rounded"></span>
+                        <span class="animate-pulse bg-gray-300 h-4 w-1/4 rounded"></span>
+                    </li>
+                    <li class="py-2 px-4 rounded-lg bg-gray-100 flex items-center justify-between text-sm">
+                        <span class="animate-pulse bg-gray-300 h-4 w-1/3 rounded"></span>
+                        <span class="animate-pulse bg-gray-300 h-4 w-1/5 rounded"></span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Name Input Modal -->
+    <div id="nameModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 transition-opacity duration-300">
+        <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm flex flex-col items-center">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Enter Your Name</h2>
+            <input type="text" id="playerNameInput" placeholder="Your name" class="w-full px-4 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4">
+            <button id="startGameButton" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-transform transform hover:scale-105 active:scale-95 shadow-md">
+                Start Game
+            </button>
+        </div>
+    </div>
+</body>
+</html>
